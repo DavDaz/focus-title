@@ -3,11 +3,13 @@ import asyncio
 import csv
 import os
 import datetime
+import atexit
 from models import Task, TaskFactory, TimerState
 from utils import format_time, calculate_font_sizes, create_button
 from ui_components import create_task_display, create_welcome_screen, create_input_fields
 from settings_screen import create_settings_screen
 from dialogs import create_settings_dialog
+from database import Database
 
 def main(page: ft.Page):
     # Configuración inicial de la página
@@ -21,6 +23,35 @@ def main(page: ft.Page):
     # Configuración para que la aplicación sea responsive
     page.on_resize = lambda _: page.update()
     
+    # Inicializar la base de datos
+    db = Database()
+    
+    # Función para guardar todas las tareas periódicamente
+    async def save_tasks_periodically():
+        while True:
+            await asyncio.sleep(60)  # Guardar cada minuto
+            try:
+                print("Guardando tareas periódicamente...")
+                db.save_all_tasks(tasks)
+            except Exception as e:
+                print(f"Error al guardar tareas periódicamente: {e}")
+    
+    # Iniciar el guardado periódico
+    page.run_task(save_tasks_periodically)
+    
+    # Función para guardar tareas cuando la página se cierra
+    def on_window_event(e):
+        if e.data == "close":
+            print("Ventana cerrando, guardando tareas...")
+            try:
+                db.save_all_tasks(tasks)
+                db.close()
+            except Exception as e:
+                print(f"Error al guardar tareas al cerrar: {e}")
+    
+    # Registrar el evento de cierre de ventana
+    page.on_window_event = on_window_event
+    
     # Variables para controlar el temporizador
     timer_running = False
     timer_paused = False
@@ -29,11 +60,25 @@ def main(page: ft.Page):
     font_size_multiplier = 1.0
     
     # Lista de tareas
-    tasks = []
-    current_task_index = 0
+    tasks = db.load_tasks()  # Cargar tareas desde la base de datos
+    current_task_index = 0 if len(tasks) > 0 else -1
     
-    # Crear campos de entrada para el título y la nota
+    # Variable para controlar si ya se actualizó la lista de tareas
+    tasks_list_updated = False
+    
+    # Crear campos de entrada para el título, la nota y el enlace
     title_input, note_input = create_input_fields()
+    
+    # Campo de entrada para el enlace
+    link_input = ft.TextField(
+        label="Enlace (opcional)",
+        border_radius=8,
+        text_size=16,
+        expand=True,
+        border_color=ft.Colors.BLUE_400,
+        focused_border_color=ft.Colors.BLUE_700,
+        prefix_icon=ft.Icons.LINK
+    )
     
     # Crear el texto del temporizador
     timer_text = ft.Text(
@@ -61,9 +106,10 @@ def main(page: ft.Page):
     )
     
     # Crear componentes de visualización de tareas
-    task_components = create_task_display("", "", timer_text, task_position_text)
+    task_components = create_task_display("", "", timer_text, task_position_text, "")
     display_title = task_components["title"]
     display_note = task_components["note"]
+    display_link = task_components["link"]
     timer_container = task_components["timer_container"]
     prev_task_button = task_components["prev_button"]
     next_task_button = task_components["next_button"]
@@ -199,7 +245,7 @@ def main(page: ft.Page):
     
     # Función para agregar una tarea a la lista
     def add_task_to_list():
-        nonlocal tasks
+        nonlocal tasks, current_task_index
         
         # Verificar que haya un título
         if not title_input.value or title_input.value.strip() == "":
@@ -210,12 +256,20 @@ def main(page: ft.Page):
             return
         
         # Crear una nueva tarea
-        new_task = TaskFactory.create_task(title_input.value, note_input.value)
+        new_task = TaskFactory.create_task(title_input.value, note_input.value, link_input.value)
         tasks.append(new_task)
+        
+        # Guardar la tarea en la base de datos
+        db.save_task(new_task)
+        
+        # Si es la primera tarea, establecer el índice actual
+        if current_task_index == -1:
+            current_task_index = 0
         
         # Limpiar los campos de entrada
         title_input.value = ""
         note_input.value = ""
+        link_input.value = ""
         
         # Actualizar el contador de tareas
         task_list_text.value = f"Tareas agregadas: {len(tasks)}"
@@ -284,7 +338,7 @@ def main(page: ft.Page):
     
     # Función para eliminar una tarea
     def delete_task(task_index):
-        nonlocal current_task_index, timer_running, timer_paused
+        nonlocal tasks, current_task_index, timer_running, timer_paused
         
         # Verificar que el índice sea válido
         if task_index < 0 or task_index >= len(tasks):
@@ -293,6 +347,11 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
             return
+            
+        # Obtener el ID de la tarea para eliminarla de la base de datos
+        task_id = getattr(tasks[task_index], 'id', None)
+        if task_id:
+            db.delete_task(task_id)
         
         print(f"Eliminando tarea {task_index + 1}: {tasks[task_index].title}")
         
@@ -404,6 +463,18 @@ def main(page: ft.Page):
             ft.Text(f"Título: {task.title}", style=ft.TextStyle(size=16)),
             ft.Text(f"Nota: {task.note if task.note else 'N/A'}", style=ft.TextStyle(size=14, color=ft.Colors.GREY_500)),
             ft.Row([
+                ft.Text("Enlace: ", style=ft.TextStyle(size=14, color=ft.Colors.GREY_700)),
+                ft.TextButton(
+                    text=task.link if hasattr(task, 'link') and task.link else "N/A",
+                    url=task.link if hasattr(task, 'link') and task.link else None,
+                    tooltip="Haz clic para abrir el enlace" if hasattr(task, 'link') and task.link else "No hay enlace disponible",
+                    style=ft.ButtonStyle(
+                        color=ft.Colors.BLUE_700 if hasattr(task, 'link') and task.link else ft.Colors.GREY_500,
+                    ),
+                    disabled=not (hasattr(task, 'link') and task.link),
+                ),
+            ]),
+            ft.Row([
                 ft.ElevatedButton(
                     text="Editar",
                     icon=ft.Icons.EDIT,
@@ -443,6 +514,13 @@ def main(page: ft.Page):
             width=400,
         )
         
+        edit_link_field = ft.TextField(
+            value=task.link if hasattr(task, 'link') and task.link else "",
+            label="Enlace",
+            border_radius=10,
+            width=400,
+        )
+        
         # Crear un contenedor para la vista de edición
         edit_view = ft.Column([
             ft.Row([
@@ -451,11 +529,12 @@ def main(page: ft.Page):
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             edit_title_field,
             edit_note_field,
+            edit_link_field,
             ft.Row([
                 ft.ElevatedButton(
                     text="Guardar",
                     icon=ft.Icons.SAVE,
-                    on_click=lambda e, idx=index, tf=edit_title_field, nf=edit_note_field: save_task_changes(idx, tf, nf),
+                    on_click=lambda e, idx=index, tf=edit_title_field, nf=edit_note_field, lf=edit_link_field: save_task_changes(idx, tf, nf, lf),
                     style=ft.ButtonStyle(
                         color=ft.Colors.WHITE,
                         bgcolor=ft.Colors.GREEN_700,
@@ -518,7 +597,7 @@ def main(page: ft.Page):
                 break
     
     # Función para guardar los cambios en una tarea
-    def save_task_changes(task_index, title_field, note_field):
+    def save_task_changes(task_index, title_field, note_field, link_field=None):
         # Verificar que el título no esté vacío
         if not title_field.value or title_field.value.strip() == "":
             page.snack_bar = ft.SnackBar(content=ft.Text("El título de la tarea no puede estar vacío"))
@@ -537,10 +616,26 @@ def main(page: ft.Page):
         tasks[task_index].title = title_field.value
         tasks[task_index].note = note_field.value
         
+        # Actualizar el enlace si se proporcionó
+        if link_field:
+            tasks[task_index].link = link_field.value
+            
+        # Guardar los cambios en la base de datos
+        db.save_task(tasks[task_index])
+        
         # Si la tarea actual es la que se está editando, actualizar la interfaz principal
         if task_index == current_task_index:
             display_title.value = title_field.value
             display_note.value = note_field.value
+            
+            # Actualizar el enlace en la interfaz principal
+            if link_field:
+                link_value = link_field.value
+                display_link.text = link_value if link_value else "Sin enlace"
+                display_link.url = link_value if link_value else None
+                display_link.tooltip = "Haz clic para abrir el enlace" if link_value else "No hay enlace disponible"
+                display_link.style.color = ft.Colors.BLUE_700 if link_value else ft.Colors.GREY_400
+                display_link.disabled = not link_value
         
         # Volver al modo de visualización
         toggle_edit_mode(task_index)
@@ -580,19 +675,20 @@ def main(page: ft.Page):
                 csv_writer = csv.writer(csvfile, quoting=csv.QUOTE_MINIMAL)
                 
                 # Escribir encabezados sin tildes
-                csv_writer.writerow(["Tarea", "Titulo", "Nota", "Tiempo (segundos)", "Tiempo (formato)"])
+                csv_writer.writerow(["Tarea", "Titulo", "Nota", "Enlace", "Tiempo (segundos)", "Tiempo (formato)"])
                 
                 # Escribir datos de cada tarea
                 for i, task in enumerate(tasks):
-                    # Manejar comillas dobles en título y nota
+                    # Manejar comillas dobles en título, nota y enlace
                     title = task.title.replace('"', "'")
                     note = task.note.replace('"', "'") if task.note else ""
+                    link = task.link.replace('"', "'") if hasattr(task, 'link') and task.link else ""
                     
                     # Obtener el tiempo formateado
                     time_str = format_time(task.elapsed_time)
                     
                     # Escribir fila
-                    csv_writer.writerow([i+1, title, note, task.elapsed_time, time_str])
+                    csv_writer.writerow([i+1, title, note, link, task.elapsed_time, time_str])
             
             # Mostrar mensaje de éxito en snackbar
             page.snack_bar = ft.SnackBar(content=ft.Text("Archivo CSV exportado exitosamente"))
@@ -656,6 +752,14 @@ def main(page: ft.Page):
             display_title.value = new_current_task.title
             display_note.value = new_current_task.note
             
+            # Actualizar el enlace
+            link_value = new_current_task.link if hasattr(new_current_task, 'link') else ""
+            display_link.text = link_value if link_value else "Sin enlace"
+            display_link.url = link_value if link_value else None
+            display_link.tooltip = "Haz clic para abrir el enlace" if link_value else "No hay enlace disponible"
+            display_link.style.color = ft.Colors.BLUE_700 if link_value else ft.Colors.GREY_400
+            display_link.disabled = not link_value
+            
             # Establecer el tiempo guardado para esta tarea
             elapsed_time = new_current_task.elapsed_time
             
@@ -705,6 +809,14 @@ def main(page: ft.Page):
         display_title.value = current_task.title
         display_note.value = current_task.note
         
+        # Actualizar el enlace
+        link_value = current_task.link if hasattr(current_task, 'link') else ""
+        display_link.text = link_value if link_value else "Sin enlace"
+        display_link.url = link_value if link_value else None
+        display_link.tooltip = "Haz clic para abrir el enlace" if link_value else "No hay enlace disponible"
+        display_link.style.color = ft.Colors.BLUE_700 if link_value else ft.Colors.GREY_400
+        display_link.disabled = not link_value
+        
         # Establecer el tiempo guardado para esta tarea
         elapsed_time = current_task.elapsed_time
         timer_text.value = format_time(elapsed_time)
@@ -716,11 +828,10 @@ def main(page: ft.Page):
         prev_task_button.visible = current_task_index > 0
         next_task_button.visible = current_task_index < len(tasks) - 1
         
-        # Iniciar el temporizador
-        current_task.timer.start()
-        timer_running = True
+        # Configurar el botón de pausa/reanudación para iniciar (no iniciar automáticamente)
+        timer_running = False
         timer_paused = False
-        pause_resume_button.icon = ft.Icons.PAUSE
+        pause_resume_button.icon = ft.Icons.PLAY_ARROW
         
         # Mostrar la pantalla de tareas y ocultar la pantalla de inicio
         welcome_container.visible = False
@@ -729,8 +840,8 @@ def main(page: ft.Page):
         # Actualizar la página
         page.update()
         
-        # Iniciar la actualización del temporizador
-        page.run_task(update_display)
+        # No iniciamos la actualización del temporizador automáticamente
+        # Solo se iniciará cuando el usuario haga clic en el botón de reproducción
     
     # Crear botones para la pantalla de inicio
     start_button = create_button(
@@ -765,7 +876,7 @@ def main(page: ft.Page):
     
     # Crear la pantalla de bienvenida
     welcome_container = create_welcome_screen(
-        title_input, note_input, add_task_button, 
+        title_input, note_input, link_input, add_task_button, 
         start_button, settings_button, task_list_text
     )
     
@@ -890,6 +1001,9 @@ def main(page: ft.Page):
         bgcolor=ft.Colors.WHITE,
         visible=False
     )
+    
+    # Actualizar la lista de tareas antes de mostrar la pantalla de bienvenida
+    update_task_list()
     
     # Inicialmente, mostrar la pantalla de bienvenida y ocultar las demás
     welcome_container.visible = True

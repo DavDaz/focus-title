@@ -60,6 +60,18 @@ def create_settings_dialog(page, tasks, current_task_index, timer_running, timer
                         ft.Text(f"Título: {task.title}", style=ft.TextStyle(size=16)),
                         ft.Text(f"Nota: {task.note if task.note else 'N/A'}", style=ft.TextStyle(size=14, color=ft.Colors.GREY_400)),
                         ft.Row([
+                            ft.Text("Enlace: ", style=ft.TextStyle(size=14, color=ft.Colors.GREY_700)),
+                            ft.TextButton(
+                                text=task.link if hasattr(task, 'link') and task.link else "N/A",
+                                url=task.link if hasattr(task, 'link') and task.link else None,
+                                tooltip="Haz clic para abrir el enlace" if hasattr(task, 'link') and task.link else "No hay enlace disponible",
+                                style=ft.ButtonStyle(
+                                    color=ft.Colors.BLUE_700 if hasattr(task, 'link') and task.link else ft.Colors.GREY_400,
+                                ),
+                                disabled=not (hasattr(task, 'link') and task.link),
+                            ),
+                        ]),
+                        ft.Row([
                             ft.IconButton(
                                 icon=ft.Icons.EDIT,
                                 tooltip="Editar tarea",
@@ -96,7 +108,7 @@ def create_settings_dialog(page, tasks, current_task_index, timer_running, timer
         task = tasks[task_index]
         print(f"Editando tarea {task_index + 1}: {task.title}")
         
-        # Crear campos de texto para el título y la nota
+        # Crear campos de texto para el título, la nota y el enlace
         edit_title_field = ft.TextField(
             label="Título de la tarea",
             value=task.title,
@@ -115,6 +127,13 @@ def create_settings_dialog(page, tasks, current_task_index, timer_running, timer
             width=400,
         )
         
+        edit_link_field = ft.TextField(
+            label="Enlace (opcional)",
+            value=task.link if hasattr(task, 'link') else "",
+            border_radius=10,
+            width=400,
+        )
+        
         # Crear el diálogo de edición
         edit_dialog = ft.AlertDialog(
             modal=True,  # Hacer que el diálogo sea modal
@@ -123,6 +142,7 @@ def create_settings_dialog(page, tasks, current_task_index, timer_running, timer
                 [
                     edit_title_field,
                     edit_note_field,
+                    edit_link_field,
                 ],
                 spacing=20,
                 width=400,
@@ -147,12 +167,12 @@ def create_settings_dialog(page, tasks, current_task_index, timer_running, timer
             # Actualizar la tarea
             tasks[task_index].title = edit_title_field.value
             tasks[task_index].note = edit_note_field.value
+            tasks[task_index].link = edit_link_field.value
             
             # Si la tarea actual es la que se está editando, actualizar la interfaz
             if task_index == current_task_index:
-                if display_title:
+                if display_title and display_note:
                     display_title.value = edit_title_field.value
-                if display_note:
                     display_note.value = edit_note_field.value
             
             # Cerrar el diálogo de edición

@@ -57,9 +57,10 @@ class TaskTimer:
 
 # Clase para las tareas
 class Task:
-    def __init__(self, title, note):
+    def __init__(self, title, note, link=None):
         self.title = title
         self.note = note
+        self.link = link
         self.timer = TaskTimer()
     
     @property
@@ -73,5 +74,5 @@ class Task:
 # Fábrica de tareas (patrón Factory)
 class TaskFactory:
     @staticmethod
-    def create_task(title, note):
-        return Task(title, note)
+    def create_task(title, note, link=None):
+        return Task(title, note, link)
