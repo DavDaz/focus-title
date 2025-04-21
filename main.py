@@ -389,13 +389,22 @@ def main(page: ft.Page):
         )
         
         # Establecer el tiempo acumulado
-        new_task.elapsed_time = deleted_task.elapsed_time
+        elapsed_time = getattr(deleted_task, 'elapsed_time', 0)
+        print(f"Restaurando tarea con tiempo acumulado: {elapsed_time} segundos")
+        new_task.elapsed_time = elapsed_time
+        
+        # Asegurarse de que el temporizador tenga el tiempo correcto
+        new_task.timer.set_elapsed_time(elapsed_time)
         
         # Agregar la tarea a la lista de tareas
         tasks.append(new_task)
         
         # Guardar la tarea en la base de datos
-        db.save_task(new_task)
+        saved_task = db.save_task(new_task)
+        if saved_task:
+            print(f"Tarea restaurada guardada con ID: {saved_task.id}")
+        else:
+            print("Error al guardar la tarea restaurada en la base de datos")
         
         # Eliminar la tarea de la tabla de tareas eliminadas
         # Esto evita que aparezca en la lista de tareas eliminadas
@@ -405,6 +414,7 @@ def main(page: ft.Page):
                 with db.lock:
                     db.cursor.execute("DELETE FROM deleted_tasks WHERE id = ?", (deleted_task.id,))
                     db.connection.commit()
+                    print(f"Tarea eliminada de la tabla deleted_tasks con ID: {deleted_task.id}")
             except Exception as e:
                 print(f"Error al eliminar tarea restaurada del historial: {e}")
         
@@ -416,7 +426,7 @@ def main(page: ft.Page):
             start_button.disabled = False
         
         # Mostrar mensaje de confirmación
-        page.snack_bar = ft.SnackBar(content=ft.Text(f"Tarea '{deleted_task.title}' restaurada"))
+        page.snack_bar = ft.SnackBar(content=ft.Text(f"Tarea '{deleted_task.title}' restaurada con tiempo: {format_time(elapsed_time)}"))
         page.snack_bar.open = True
         
         # Actualizar la pantalla de configuración inmediatamente
@@ -669,8 +679,7 @@ def main(page: ft.Page):
         page.controls = [edit_screen_container]
         page.scroll = "auto"  # Permitir desplazamiento si es necesario
         page.update()
-        
-        print("DEBUG: Pantalla de edición mostrada en la parte superior")
+        page.update()
     
     # Función para eliminar una tarea
     def delete_task(task_index):
@@ -697,20 +706,104 @@ def main(page: ft.Page):
             timer_running = False
             timer_paused = False
         
+        # Guardar el tiempo acumulado para asegurarnos de que se preserve
+        # Asegurarnos de obtener el tiempo acumulado más reciente
+        if task_to_delete.timer.state == TimerState.RUNNING:
+            # Si el temporizador está corriendo, obtener el tiempo actualizado
+            elapsed_time = task_to_delete.timer.get_elapsed_time()
+            print(f"Temporizador en ejecución, tiempo actualizado: {elapsed_time} segundos")
+        else:
+            # Si el temporizador está detenido o pausado, usar el tiempo guardado
+            elapsed_time = task_to_delete.elapsed_time
+            print(f"Temporizador no en ejecución, tiempo guardado: {elapsed_time} segundos")
+        
+        # Actualizar el tiempo acumulado en la tarea antes de eliminarla
+        task_to_delete.elapsed_time = elapsed_time
+        task_to_delete.timer.set_elapsed_time(elapsed_time)
+        print(f"Tiempo acumulado final de la tarea a eliminar: {elapsed_time} segundos")
+        
         # Guardar la tarea en la tabla de tareas eliminadas antes de eliminarla
         if task_id:
             # Asegurarse de que la tarea tenga todos los atributos necesarios
             if not hasattr(task_to_delete, 'link'):
                 task_to_delete.link = ""
-                
+            
             # Intentar eliminar la tarea de la base de datos (esto la mueve a deleted_tasks)
-            success = db.delete_task(task_id)
+            # Pasar el tiempo acumulado actualizado para asegurar que se preserve
+            success = db.delete_task(task_id, elapsed_time)
             if success:
-                print(f"Tarea guardada en deleted_tasks con ID: {task_id}")
+                print(f"Tarea guardada en deleted_tasks con ID: {task_id} y tiempo: {elapsed_time} segundos")
             else:
                 print(f"Error al guardar la tarea en deleted_tasks")
+                # Intentar insertar directamente en la tabla deleted_tasks como respaldo
+                try:
+                    with db.lock:
+                        db.cursor.execute('''
+                        INSERT INTO deleted_tasks (title, note, link, elapsed_time)
+                        VALUES (?, ?, ?, ?)
+                        ''', (
+                            task_to_delete.title,
+                            task_to_delete.note,
+                            getattr(task_to_delete, 'link', ''),
+                            elapsed_time
+                        ))
+                        db.connection.commit()
+                        print(f"Tarea insertada directamente en deleted_tasks como respaldo")
+                except Exception as e:
+                    print(f"Error al insertar directamente en deleted_tasks: {e}")
         else:
-            print(f"La tarea no tiene ID, no se puede guardar en deleted_tasks")
+            # Si la tarea no tiene ID, primero guardarla en la base de datos para obtener un ID
+            print(f"La tarea no tiene ID, intentando guardarla primero")
+            try:
+                # Guardar la tarea para obtener un ID
+                saved_task = db.save_task(task_to_delete)
+                if saved_task:
+                    task_id = saved_task.id
+                    print(f"Tarea guardada con nuevo ID: {task_id}")
+                    
+                    # Ahora intentar moverla a deleted_tasks
+                    # Pasar el tiempo acumulado actualizado para asegurar que se preserve
+                    success = db.delete_task(task_id, elapsed_time)
+                    if success:
+                        print(f"Tarea guardada en deleted_tasks con ID: {task_id} y tiempo: {elapsed_time} segundos")
+                    else:
+                        print(f"Error al guardar la tarea en deleted_tasks")
+                        # Intentar insertar directamente como respaldo
+                        try:
+                            with db.lock:
+                                db.cursor.execute('''
+                                INSERT INTO deleted_tasks (title, note, link, elapsed_time)
+                                VALUES (?, ?, ?, ?)
+                                ''', (
+                                    task_to_delete.title,
+                                    task_to_delete.note,
+                                    getattr(task_to_delete, 'link', ''),
+                                    elapsed_time
+                                ))
+                                db.connection.commit()
+                                print(f"Tarea insertada directamente en deleted_tasks como respaldo")
+                        except Exception as e:
+                            print(f"Error al insertar directamente en deleted_tasks: {e}")
+                else:
+                    print(f"No se pudo obtener un ID para la tarea")
+                    # Intentar insertar directamente como respaldo
+                    try:
+                        with db.lock:
+                            db.cursor.execute('''
+                            INSERT INTO deleted_tasks (title, note, link, elapsed_time)
+                            VALUES (?, ?, ?, ?)
+                            ''', (
+                                task_to_delete.title,
+                                task_to_delete.note,
+                                getattr(task_to_delete, 'link', ''),
+                                elapsed_time
+                            ))
+                            db.connection.commit()
+                            print(f"Tarea insertada directamente en deleted_tasks como respaldo")
+                    except Exception as e:
+                        print(f"Error al insertar directamente en deleted_tasks: {e}")
+            except Exception as e:
+                print(f"Error al intentar guardar la tarea: {e}")
         
         # Eliminar la tarea de la lista en memoria
         print(f"Eliminando tarea {task_index + 1}: {task_name}")
@@ -722,11 +815,6 @@ def main(page: ft.Page):
         task_list_text.value = f"Tareas agregadas: {len(tasks)}"
         
         # Si no hay tareas, deshabilitar el botón de inicio
-        
-        # Verificar si estamos en la pantalla de configuración
-        if config_container.visible:
-            # Actualizar la pantalla de configuración en tiempo real
-            show_settings_screen()
         if len(tasks) == 0:
             start_button.disabled = True
         else:
@@ -752,9 +840,16 @@ def main(page: ft.Page):
         
         # Actualizar la lista de tareas
         update_task_list()
+        
+        # Verificar si estamos en la pantalla de configuración y actualizarla
+        # para mostrar la tarea en la lista de eliminados inmediatamente
+        if config_container.visible:
+            # Actualizar la pantalla de configuración en tiempo real
+            show_settings_screen()
+        
         page.update()
     
-    # Esta función ya no se usa, pero la mantenemos por compatibilidad
+    # Función para confirmar la eliminación de una tarea
     def confirm_delete_task(task_index, dialog):
         # Cerrar el diálogo de confirmación
         dialog.open = False

@@ -69,6 +69,15 @@ class Database:
                 # Verificar si la tarea ya tiene un ID (para actualización)
                 task_id = getattr(task, 'id', None)
                 
+                # Asegurarnos de obtener el tiempo acumulado más reciente
+                elapsed_time = task.elapsed_time
+                if task.timer.state == TimerState.RUNNING:
+                    # Si el temporizador está corriendo, obtener el tiempo actualizado
+                    elapsed_time = task.timer.get_elapsed_time()
+                    print(f"Guardando tarea con temporizador en ejecución, tiempo actualizado: {elapsed_time} segundos")
+                else:
+                    print(f"Guardando tarea con temporizador no en ejecución, tiempo: {elapsed_time} segundos")
+                
                 if task_id:
                     # Actualizar tarea existente
                     self.cursor.execute('''
@@ -79,7 +88,7 @@ class Database:
                         task.title, 
                         task.note, 
                         getattr(task, 'link', ''),
-                        task.elapsed_time,
+                        elapsed_time,  # Usar el tiempo actualizado
                         task.timer.state.value,
                         task_id
                     ))
@@ -92,7 +101,7 @@ class Database:
                         task.title, 
                         task.note, 
                         getattr(task, 'link', ''),
-                        task.elapsed_time,
+                        elapsed_time,  # Usar el tiempo actualizado
                         task.timer.state.value
                     ))
                     # Obtener el ID generado y asignarlo a la tarea
@@ -187,8 +196,13 @@ class Database:
                 print(f"Error al cargar las tareas: {e}")
                 return []
     
-    def delete_task(self, task_id):
-        """Elimina una tarea por su ID y la guarda en la tabla de tareas eliminadas"""
+    def delete_task(self, task_id, elapsed_time=None):
+        """Elimina una tarea por su ID y la guarda en la tabla de tareas eliminadas
+        
+        Args:
+            task_id: ID de la tarea a eliminar
+            elapsed_time: Tiempo acumulado actualizado (opcional)
+        """
         with self.lock:  # Adquirir el bloqueo para operaciones de base de datos
             try:
                 print(f"Intentando eliminar tarea con ID: {task_id}")
@@ -201,6 +215,12 @@ class Database:
                     print(f"Tarea encontrada: {task_row['title']}")
                     
                     try:
+                        # Determinar qué tiempo usar
+                        time_to_use = elapsed_time if elapsed_time is not None else task_row['elapsed_time']
+                        print(f"Tiempo acumulado en la base de datos: {task_row['elapsed_time']} segundos")
+                        print(f"Tiempo acumulado proporcionado: {elapsed_time if elapsed_time is not None else 'None'} segundos")
+                        print(f"Tiempo acumulado que se usará: {time_to_use} segundos")
+                        
                         # Guardar la tarea en la tabla de tareas eliminadas
                         self.cursor.execute('''
                         INSERT INTO deleted_tasks (title, note, link, elapsed_time)
@@ -209,7 +229,7 @@ class Database:
                             task_row['title'],
                             task_row['note'],
                             task_row['link'],
-                            task_row['elapsed_time']
+                            time_to_use  # Usar el tiempo proporcionado si está disponible
                         ))
                         
                         # Verificar que se haya insertado correctamente
@@ -257,12 +277,19 @@ class Database:
                     # Asignar el ID de la base de datos
                     task.id = row['id']
                     
-                    # Establecer el tiempo acumulado
-                    task.elapsed_time = row['elapsed_time']
+                    # Obtener el tiempo acumulado de la base de datos
+                    elapsed_time = row['elapsed_time']
+                    
+                    # Establecer el tiempo acumulado en la propiedad
+                    task.elapsed_time = elapsed_time
+                    
+                    # Asegurarse de que el temporizador tenga el tiempo correcto
+                    task.timer.set_elapsed_time(elapsed_time)
                     
                     # Guardar la fecha de eliminación
                     task.deleted_at = row['deleted_at']
                     
+                    print(f"Tarea eliminada cargada: {task.title}, tiempo: {elapsed_time} segundos")
                     deleted_tasks.append(task)
                 
                 print(f"Se cargaron {len(deleted_tasks)} tareas eliminadas desde la base de datos")
