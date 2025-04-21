@@ -41,6 +41,19 @@ class Database:
                 timer_state INTEGER DEFAULT 0
             )
             ''')
+            
+            # Crear tabla para tareas eliminadas
+            self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS deleted_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                note TEXT,
+                link TEXT,
+                elapsed_time INTEGER DEFAULT 0,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+            
             self.connection.commit()
             print("Tablas creadas o verificadas correctamente")
         except sqlite3.Error as e:
@@ -103,6 +116,11 @@ class Database:
                     # Insertar directamente sin llamar a save_task para evitar bloqueos anidados
                     task_id = getattr(task, 'id', None)
                     
+                    # Asegurarse de que el tiempo acumulado esté actualizado
+                    # Si la tarea está en ejecución, calcular el tiempo acumulado actual
+                    # antes de guardarlo en la base de datos
+                    current_elapsed_time = task.elapsed_time
+                    
                     self.cursor.execute('''
                     INSERT INTO tasks (title, note, link, elapsed_time, timer_state)
                     VALUES (?, ?, ?, ?, ?)
@@ -110,7 +128,7 @@ class Database:
                         task.title, 
                         task.note, 
                         getattr(task, 'link', ''),
-                        task.elapsed_time,
+                        current_elapsed_time,
                         task.timer.state.value
                     ))
                     
@@ -145,11 +163,21 @@ class Database:
                     task.id = row['id']
                     
                     # Establecer el tiempo acumulado
-                    task.elapsed_time = row['elapsed_time']
+                    elapsed_time = row['elapsed_time']
+                    task.elapsed_time = elapsed_time
                     
                     # Establecer el estado del temporizador
                     timer_state = row['timer_state']
                     task.timer.state = TimerState(timer_state)
+                    
+                    # Si el temporizador estaba en ejecución, asegurarse de que el tiempo de inicio
+                    # se establezca correctamente para que el tiempo acumulado se mantenga
+                    # Nota: En realidad, al cargar siempre ponemos el temporizador en estado STOPPED
+                    # para evitar que siga corriendo sin control
+                    task.timer.state = TimerState.STOPPED
+                    
+                    # Imprimir información de depuración
+                    print(f"Tarea cargada: {task.title}, Tiempo: {elapsed_time} segundos")
                     
                     tasks.append(task)
                 
@@ -160,14 +188,110 @@ class Database:
                 return []
     
     def delete_task(self, task_id):
-        """Elimina una tarea por su ID"""
+        """Elimina una tarea por su ID y la guarda en la tabla de tareas eliminadas"""
         with self.lock:  # Adquirir el bloqueo para operaciones de base de datos
             try:
-                self.cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-                self.connection.commit()
-                return True
+                print(f"Intentando eliminar tarea con ID: {task_id}")
+                
+                # Primero obtener la tarea que se va a eliminar
+                self.cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+                task_row = self.cursor.fetchone()
+                
+                if task_row:
+                    print(f"Tarea encontrada: {task_row['title']}")
+                    
+                    try:
+                        # Guardar la tarea en la tabla de tareas eliminadas
+                        self.cursor.execute('''
+                        INSERT INTO deleted_tasks (title, note, link, elapsed_time)
+                        VALUES (?, ?, ?, ?)
+                        ''', (
+                            task_row['title'],
+                            task_row['note'],
+                            task_row['link'],
+                            task_row['elapsed_time']
+                        ))
+                        
+                        # Verificar que se haya insertado correctamente
+                        deleted_id = self.cursor.lastrowid
+                        print(f"Tarea guardada en deleted_tasks con ID: {deleted_id}")
+                        
+                        # Eliminar la tarea de la tabla principal
+                        self.cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+                        self.connection.commit()
+                        print(f"Tarea eliminada de la tabla principal y movida a deleted_tasks")
+                        return True
+                    except sqlite3.Error as inner_e:
+                        print(f"Error al mover la tarea a deleted_tasks: {inner_e}")
+                        # Intentar hacer rollback
+                        self.connection.rollback()
+                        return False
+                else:
+                    print(f"No se encontró ninguna tarea con ID: {task_id}")
+                    return False
             except sqlite3.Error as e:
                 print(f"Error al eliminar la tarea: {e}")
+                # Intentar hacer rollback
+                try:
+                    self.connection.rollback()
+                except:
+                    pass
+                return False
+    
+    def load_deleted_tasks(self):
+        """Carga todas las tareas eliminadas desde la base de datos"""
+        with self.lock:  # Adquirir el bloqueo para operaciones de base de datos
+            try:
+                self.cursor.execute("SELECT * FROM deleted_tasks ORDER BY deleted_at DESC")
+                rows = self.cursor.fetchall()
+                
+                deleted_tasks = []
+                for row in rows:
+                    # Crear una tarea con los datos de la base de datos
+                    task = TaskFactory.create_task(
+                        title=row['title'],
+                        note=row['note'],
+                        link=row['link']
+                    )
+                    
+                    # Asignar el ID de la base de datos
+                    task.id = row['id']
+                    
+                    # Establecer el tiempo acumulado
+                    task.elapsed_time = row['elapsed_time']
+                    
+                    # Guardar la fecha de eliminación
+                    task.deleted_at = row['deleted_at']
+                    
+                    deleted_tasks.append(task)
+                
+                print(f"Se cargaron {len(deleted_tasks)} tareas eliminadas desde la base de datos")
+                return deleted_tasks
+            except sqlite3.Error as e:
+                print(f"Error al cargar las tareas eliminadas: {e}")
+                return []
+    
+    def clear_deleted_tasks(self):
+        """Elimina todas las tareas de la tabla de tareas eliminadas"""
+        with self.lock:  # Adquirir el bloqueo para operaciones de base de datos
+            try:
+                # Contar cuántas tareas hay antes de eliminar
+                self.cursor.execute("SELECT COUNT(*) FROM deleted_tasks")
+                count_before = self.cursor.fetchone()[0]
+                print(f"Intentando eliminar {count_before} tareas eliminadas")
+                
+                # Ejecutar la eliminación
+                self.cursor.execute("DELETE FROM deleted_tasks")
+                self.connection.commit()
+                
+                # Verificar que se hayan eliminado
+                self.cursor.execute("SELECT COUNT(*) FROM deleted_tasks")
+                count_after = self.cursor.fetchone()[0]
+                print(f"Después de eliminar, quedan {count_after} tareas eliminadas")
+                
+                return True
+            except sqlite3.Error as e:
+                print(f"Error al limpiar las tareas eliminadas: {e}")
                 return False
     
     def close(self):

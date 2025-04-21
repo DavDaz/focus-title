@@ -3,7 +3,8 @@ import asyncio
 import csv
 import os
 import datetime
-import atexit
+import time
+import atexit  # Para asegurar guardado robusto al cerrar la app
 from models import Task, TaskFactory, TimerState
 from utils import format_time, calculate_font_sizes, create_button
 from ui_components import create_task_display, create_welcome_screen, create_input_fields
@@ -40,17 +41,31 @@ def main(page: ft.Page):
     page.run_task(save_tasks_periodically)
     
     # Función para guardar tareas cuando la página se cierra
+    def save_all_and_close():
+        print("Guardando todas las tareas y cerrando la base de datos...")
+        try:
+            # Pausar todos los temporizadores activos y actualizar tiempos
+            for task in tasks:
+                if hasattr(task, 'timer') and task.timer.state == TimerState.RUNNING:
+                    task.timer.pause()
+                    print(f"Temporizador de '{task.title}' pausado con tiempo acumulado: {task.elapsed_time} segundos")
+            db.save_all_tasks(tasks)
+            db.close()
+            print("Tareas guardadas correctamente al cerrar la aplicación")
+        except Exception as e:
+            print(f"Error al guardar tareas al cerrar: {e}")
+
     def on_window_event(e):
         if e.data == "close":
             print("Ventana cerrando, guardando tareas...")
-            try:
-                db.save_all_tasks(tasks)
-                db.close()
-            except Exception as e:
-                print(f"Error al guardar tareas al cerrar: {e}")
+            save_all_and_close()
     
     # Registrar el evento de cierre de ventana
     page.on_window_event = on_window_event
+
+    # Registrar el handler con atexit para asegurar guardado aunque falle el evento de ventana
+    atexit.register(save_all_and_close)
+
     
     # Variables para controlar el temporizador
     timer_running = False
@@ -142,7 +157,18 @@ def main(page: ft.Page):
         
         # Si el temporizador está detenido, iniciémoslo
         if current_task.timer.state == TimerState.STOPPED:
-            current_task.timer.start()
+            # Guardar el tiempo acumulado actual
+            saved_time = current_task.elapsed_time
+            print(f"Iniciando tarea con tiempo acumulado: {saved_time} segundos")
+            
+            # En lugar de usar start() que reinicia el tiempo, vamos a establecer manualmente el estado
+            # y calcular el tiempo de inicio para que el tiempo acumulado se mantenga
+            current_task.timer.state = TimerState.RUNNING
+            current_task.timer.start_time = time.time() - saved_time
+            
+            # Actualizar el texto del temporizador para mostrar el tiempo acumulado
+            timer_text.value = format_time(saved_time)
+            
             timer_running = True
             timer_paused = False
             pause_resume_button.icon = ft.Icons.PAUSE
@@ -189,7 +215,14 @@ def main(page: ft.Page):
         
         # Asegurarse de que el temporizador esté corriendo
         if current_task.timer.state != TimerState.RUNNING:
-            current_task.timer.start()
+            # Guardar el tiempo acumulado actual
+            saved_time = current_task.elapsed_time
+            print(f"Iniciando temporizador con tiempo acumulado: {saved_time} segundos")
+            
+            # En lugar de usar start() que reinicia el tiempo, vamos a establecer manualmente el estado
+            # y calcular el tiempo de inicio para que el tiempo acumulado se mantenga
+            current_task.timer.state = TimerState.RUNNING
+            current_task.timer.start_time = time.time() - saved_time
         
         timer_running = True
         
@@ -290,20 +323,168 @@ def main(page: ft.Page):
     
     # Función para mostrar la pantalla de configuración
     def show_settings_screen(e=None):
+        # Asegurarse de que todos los contenedores estén en la página
+        if len(page.controls) == 0 or (len(page.controls) > 0 and page.controls[0] != welcome_container):
+            # Restaurar todos los contenedores principales
+            page.controls = [welcome_container, task_container, config_container]
+        
         # Ocultar las pantallas actuales
         welcome_container.visible = False
         task_container.visible = False
         
+        # Cargar las tareas eliminadas - Forzar una recarga completa desde la base de datos
+        deleted_tasks = db.load_deleted_tasks()
+        print(f"Mostrando pantalla de configuración con {len(deleted_tasks)} tareas eliminadas")
+        
+        # Función para depurar el problema con el botón de limpiar
+        def debug_clear_deleted(e):
+            print("Botón de limpiar historial presionado")
+            clear_deleted_tasks(e)
+        
+        # Crear la pantalla de configuración con las tareas eliminadas
+        settings_view = create_settings_screen(
+            page,
+            tasks,
+            current_task_index,
+            timer_running,
+            timer_paused,
+            edit_task,
+            delete_task,
+            close_settings_screen,
+            deleted_tasks,
+            restore_task,
+            debug_clear_deleted,  # Usar la función de depuración
+            export_tasks_to_csv   # Pasar la función de exportación a CSV
+        )
+        
+        # Actualizar el contenido del contenedor de configuración
+        config_container.content = settings_view
+        
         # Mostrar la pantalla de configuración
         config_container.visible = True
         
-        # Actualizar la lista de tareas en la pantalla de configuración
-        update_task_list()
-        
         page.update()
+    
+    # Función para restaurar una tarea eliminada
+    def restore_task(deleted_task_index):
+        # Cargar las tareas eliminadas
+        deleted_tasks = db.load_deleted_tasks()
+        
+        # Verificar que el índice sea válido
+        if deleted_task_index < 0 or deleted_task_index >= len(deleted_tasks):
+            print(f"Error: Índice de tarea eliminada inválido para restaurar: {deleted_task_index}")
+            page.snack_bar = ft.SnackBar(content=ft.Text("Error al restaurar la tarea"))
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        # Obtener la tarea eliminada
+        deleted_task = deleted_tasks[deleted_task_index]
+        
+        # Crear una nueva tarea con los mismos datos
+        new_task = TaskFactory.create_task(
+            title=deleted_task.title,
+            note=deleted_task.note,
+            link=getattr(deleted_task, 'link', None)
+        )
+        
+        # Establecer el tiempo acumulado
+        new_task.elapsed_time = deleted_task.elapsed_time
+        
+        # Agregar la tarea a la lista de tareas
+        tasks.append(new_task)
+        
+        # Guardar la tarea en la base de datos
+        db.save_task(new_task)
+        
+        # Eliminar la tarea de la tabla de tareas eliminadas
+        # Esto evita que aparezca en la lista de tareas eliminadas
+        if hasattr(deleted_task, 'id'):
+            try:
+                # Eliminar directamente de la tabla deleted_tasks
+                with db.lock:
+                    db.cursor.execute("DELETE FROM deleted_tasks WHERE id = ?", (deleted_task.id,))
+                    db.connection.commit()
+            except Exception as e:
+                print(f"Error al eliminar tarea restaurada del historial: {e}")
+        
+        # Actualizar el contador de tareas
+        task_list_text.value = f"Tareas agregadas: {len(tasks)}"
+        
+        # Habilitar el botón de inicio si es la primera tarea
+        if len(tasks) == 1:
+            start_button.disabled = False
+        
+        # Mostrar mensaje de confirmación
+        page.snack_bar = ft.SnackBar(content=ft.Text(f"Tarea '{deleted_task.title}' restaurada"))
+        page.snack_bar.open = True
+        
+        # Actualizar la pantalla de configuración inmediatamente
+        show_settings_screen()
+    
+    # Función para limpiar todas las tareas eliminadas
+    def clear_deleted_tasks(e=None):
+        print(f"clear_deleted_tasks llamada con parámetro: {e}")
+        
+        # Comprobar directamente si hay tareas eliminadas
+        deleted_tasks = db.load_deleted_tasks()
+        print(f"Hay {len(deleted_tasks)} tareas eliminadas para borrar")
+        
+        if len(deleted_tasks) == 0:
+            # No hay tareas para eliminar
+            page.snack_bar = ft.SnackBar(content=ft.Text("No hay tareas eliminadas para limpiar"))
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        # ELIMINAR DIRECTAMENTE SIN DIÁLOGO
+        print("Eliminando tareas sin diálogo de confirmación")
+        
+        # Ejecutar directamente la consulta SQL para asegurar que se eliminan
+        try:
+            with db.lock:
+                db.cursor.execute("DELETE FROM deleted_tasks")
+                db.connection.commit()
+                print("Consulta SQL de eliminación ejecutada directamente")
+                
+                # Verificar que se hayan eliminado
+                db.cursor.execute("SELECT COUNT(*) FROM deleted_tasks")
+                count_after = db.cursor.fetchone()[0]
+                print(f"Después de eliminar, quedan {count_after} tareas eliminadas")
+        except Exception as e:
+            print(f"Error al eliminar tareas: {e}")
+            page.snack_bar = ft.SnackBar(
+                content=ft.Text(f"Error al eliminar tareas: {e}"),
+                bgcolor=ft.Colors.RED_700,
+                action="OK"
+            )
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        # Mostrar mensaje de confirmación
+        page.snack_bar = ft.SnackBar(
+            content=ft.Text("Historial de tareas eliminadas limpiado"),
+            bgcolor=ft.Colors.GREEN_700,
+            action="OK"
+        )
+        page.snack_bar.open = True
+        
+        # Forzar la recarga de la pantalla de configuración
+        # Primero limpiar el contenedor
+        config_container.content = None
+        page.update()
+        
+        # Luego recargar la pantalla de configuración
+        show_settings_screen()
     
     # Función para cerrar la pantalla de configuración
     def close_settings_screen(e=None):
+        # Asegurarse de que todos los contenedores estén en la página
+        if len(page.controls) == 0 or page.controls[0] != welcome_container:
+            # Restaurar todos los contenedores principales
+            page.controls = [welcome_container, task_container, config_container]
+        
         # Ocultar la pantalla de configuración
         config_container.visible = False
         
@@ -323,6 +504,9 @@ def main(page: ft.Page):
     def edit_task(task_index):
         nonlocal current_task_index
         
+        # Debug print para verificar que la función se está llamando
+        print(f"DEBUG: edit_task llamada con índice {task_index}")
+        
         # Verificar que el índice sea válido
         if task_index < 0 or task_index >= len(tasks):
             print(f"Error: Índice de tarea inválido para editar: {task_index}")
@@ -333,8 +517,160 @@ def main(page: ft.Page):
         
         print(f"Editando tarea {task_index + 1}: {tasks[task_index].title}")
         
-        # Actualizar la lista de tareas para mostrar los campos de edición
-        update_task_list()
+        # Guardar el estado actual de las pantallas
+        was_in_config = config_container.visible
+        was_in_task = task_container.visible
+        was_in_welcome = welcome_container.visible
+        
+        # Ocultar todas las pantallas actuales
+        welcome_container.visible = False
+        task_container.visible = False
+        config_container.visible = False
+        
+        # Crear campos para la vista de edición
+        edit_title_field = ft.TextField(
+            value=tasks[task_index].title,
+            label="Título",
+            border_radius=10,
+            expand=True,
+        )
+        
+        edit_note_field = ft.TextField(
+            value=tasks[task_index].note if tasks[task_index].note else "",
+            label="Nota",
+            multiline=True,
+            min_lines=3,
+            max_lines=5,
+            border_radius=10,
+            expand=True,
+        )
+        
+        edit_link_field = ft.TextField(
+            value=tasks[task_index].link if hasattr(tasks[task_index], 'link') and tasks[task_index].link else "",
+            label="Enlace",
+            border_radius=10,
+            expand=True,
+        )
+        
+        # Función para cancelar la edición
+        def cancel_edit(e):
+            # Restaurar la pantalla anterior
+            if was_in_config:
+                # Restaurar la pantalla de configuración
+                page.controls = [config_container]
+                config_container.visible = True
+            elif was_in_task:
+                # Restaurar la pantalla de tareas
+                page.controls = [welcome_container, task_container, config_container]
+                task_container.visible = True
+            else:
+                # Restaurar la pantalla de inicio
+                page.controls = [welcome_container, task_container, config_container]
+                welcome_container.visible = True
+            page.update()
+        
+        # Función para guardar los cambios
+        def save_edit(e):
+            # Verificar que el título no esté vacío
+            if not edit_title_field.value or edit_title_field.value.strip() == "":
+                page.snack_bar = ft.SnackBar(content=ft.Text("El título de la tarea no puede estar vacío"))
+                page.snack_bar.open = True
+                page.update()
+                return
+                
+            # Guardar los cambios
+            save_task_changes(task_index, edit_title_field, edit_note_field, edit_link_field)
+            
+            # Restaurar la pantalla anterior
+            if was_in_config:
+                # Restaurar la pantalla de configuración
+                page.controls = [config_container]
+                config_container.visible = True
+                # Actualizar la pantalla de configuración
+                show_settings_screen()
+            elif was_in_task:
+                # Restaurar la pantalla de tareas
+                page.controls = [welcome_container, task_container, config_container]
+                task_container.visible = True
+            else:
+                # Restaurar la pantalla de inicio
+                page.controls = [welcome_container, task_container, config_container]
+                welcome_container.visible = True
+            
+            page.update()
+        
+        # Crear la pantalla de edición
+        edit_screen = ft.Column([
+            # Encabezado
+            ft.Container(
+                content=ft.Row([
+                    ft.IconButton(
+                        icon=ft.Icons.ARROW_BACK,
+                        icon_color=ft.Colors.BLUE_700,
+                        tooltip="Volver",
+                        on_click=cancel_edit
+                    ),
+                    ft.Text(
+                        f"Editar Tarea {task_index + 1}",
+                        size=24,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.BLUE_700,
+                    ),
+                ]),
+                margin=ft.margin.only(bottom=20),
+            ),
+            # Campos de edición
+            ft.Container(
+                content=ft.Column([
+                    edit_title_field,
+                    ft.Container(height=10),
+                    edit_note_field,
+                    ft.Container(height=10),
+                    edit_link_field,
+                ]),
+                padding=20,
+                border=ft.border.all(1, ft.Colors.GREY_300),
+                border_radius=10,
+                margin=ft.margin.only(bottom=20),
+            ),
+            # Botones
+            ft.Row([
+                ft.ElevatedButton(
+                    text="Cancelar",
+                    icon=ft.Icons.CANCEL,
+                    on_click=cancel_edit,
+                    style=ft.ButtonStyle(
+                        color=ft.Colors.WHITE,
+                        bgcolor=ft.Colors.RED_700,
+                    ),
+                ),
+                ft.ElevatedButton(
+                    text="Guardar",
+                    icon=ft.Icons.SAVE,
+                    on_click=save_edit,
+                    style=ft.ButtonStyle(
+                        color=ft.Colors.WHITE,
+                        bgcolor=ft.Colors.GREEN_700,
+                    ),
+                ),
+            ], alignment=ft.MainAxisAlignment.END, spacing=10),
+        ], spacing=10, expand=True)
+        
+        # Crear un contenedor para la pantalla de edición
+        edit_screen_container = ft.Container(
+            content=edit_screen,
+            expand=True,
+            padding=20,
+            bgcolor=ft.Colors.WHITE,
+        )
+        
+        # Reemplazar el contenido de la página con la pantalla de edición
+        # Esto asegura que aparezca en la parte superior
+        page.controls = [edit_screen_container]
+        page.scroll = "auto"  # Permitir desplazamiento si es necesario
+        page.update()
+        
+        print("DEBUG: Pantalla de edición mostrada en la parte superior")
     
     # Función para eliminar una tarea
     def delete_task(task_index):
@@ -347,24 +683,37 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
             return
-            
-        # Obtener el ID de la tarea para eliminarla de la base de datos
-        task_id = getattr(tasks[task_index], 'id', None)
-        if task_id:
-            db.delete_task(task_id)
         
-        print(f"Eliminando tarea {task_index + 1}: {tasks[task_index].title}")
+        # Obtener la tarea a eliminar
+        task_to_delete = tasks[task_index]
+        task_id = getattr(task_to_delete, 'id', None)
+        task_name = task_to_delete.title
         
-        # Guardar el nombre de la tarea para el mensaje de confirmación
-        task_name = tasks[task_index].title
+        print(f"Intentando eliminar tarea con ID: {task_id}")
         
         # Si la tarea que se está eliminando es la actual, detener el temporizador
         if task_index == current_task_index:
-            tasks[current_task_index].timer.stop()
+            task_to_delete.timer.stop()
             timer_running = False
             timer_paused = False
         
-        # Eliminar la tarea
+        # Guardar la tarea en la tabla de tareas eliminadas antes de eliminarla
+        if task_id:
+            # Asegurarse de que la tarea tenga todos los atributos necesarios
+            if not hasattr(task_to_delete, 'link'):
+                task_to_delete.link = ""
+                
+            # Intentar eliminar la tarea de la base de datos (esto la mueve a deleted_tasks)
+            success = db.delete_task(task_id)
+            if success:
+                print(f"Tarea guardada en deleted_tasks con ID: {task_id}")
+            else:
+                print(f"Error al guardar la tarea en deleted_tasks")
+        else:
+            print(f"La tarea no tiene ID, no se puede guardar en deleted_tasks")
+        
+        # Eliminar la tarea de la lista en memoria
+        print(f"Eliminando tarea {task_index + 1}: {task_name}")
         tasks.pop(task_index)
         
         print(f"Tarea eliminada. Quedan {len(tasks)} tareas.")
@@ -373,6 +722,11 @@ def main(page: ft.Page):
         task_list_text.value = f"Tareas agregadas: {len(tasks)}"
         
         # Si no hay tareas, deshabilitar el botón de inicio
+        
+        # Verificar si estamos en la pantalla de configuración
+        if config_container.visible:
+            # Actualizar la pantalla de configuración en tiempo real
+            show_settings_screen()
         if len(tasks) == 0:
             start_button.disabled = True
         else:
@@ -603,7 +957,7 @@ def main(page: ft.Page):
             page.snack_bar = ft.SnackBar(content=ft.Text("El título de la tarea no puede estar vacío"))
             page.snack_bar.open = True
             page.update()
-            return
+            return False
         
         # Guardar el título anterior para el mensaje de confirmación
         old_title = tasks[task_index].title
@@ -611,6 +965,9 @@ def main(page: ft.Page):
         print(f"Guardando cambios en tarea {task_index + 1}")
         print(f"  Título anterior: {old_title}")
         print(f"  Título nuevo: {title_field.value}")
+        print(f"  Nota nueva: {note_field.value}")
+        if link_field:
+            print(f"  Enlace nuevo: {link_field.value}")
         
         # Actualizar la tarea
         tasks[task_index].title = title_field.value
@@ -621,7 +978,7 @@ def main(page: ft.Page):
             tasks[task_index].link = link_field.value
             
         # Guardar los cambios en la base de datos
-        db.save_task(tasks[task_index])
+        db.save_all_tasks(tasks)  # Guardar todas las tareas para asegurar persistencia
         
         # Si la tarea actual es la que se está editando, actualizar la interfaz principal
         if task_index == current_task_index:
@@ -637,9 +994,6 @@ def main(page: ft.Page):
                 display_link.style.color = ft.Colors.BLUE_700 if link_value else ft.Colors.GREY_400
                 display_link.disabled = not link_value
         
-        # Volver al modo de visualización
-        toggle_edit_mode(task_index)
-        
         # Actualizar la lista de tareas para reflejar los cambios
         update_task_list()
         
@@ -648,17 +1002,22 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         
         page.update()
+        return True
     
     # Función para exportar tareas a CSV
-    def export_tasks_to_csv():
-        # Verificar si hay tareas para exportar
-        if len(tasks) == 0:
-            page.snack_bar = ft.SnackBar(content=ft.Text("No hay tareas para exportar"))
-            page.snack_bar.open = True
-            page.update()
-            return
-        
+    def export_tasks_to_csv(e=None):
+        # Función para exportar todas las tareas (activas y eliminadas) a un archivo CSV
         try:
+            # Cargar las tareas eliminadas desde la base de datos
+            deleted_tasks = db.load_deleted_tasks()
+            
+            # Verificar si hay tareas para exportar (activas o eliminadas)
+            if len(tasks) == 0 and len(deleted_tasks) == 0:
+                page.snack_bar = ft.SnackBar(content=ft.Text("No hay tareas para exportar"))
+                page.snack_bar.open = True
+                page.update()
+                return
+            
             # Crear el directorio de descargas si no existe
             downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
             if not os.path.exists(downloads_dir):
@@ -675,9 +1034,9 @@ def main(page: ft.Page):
                 csv_writer = csv.writer(csvfile, quoting=csv.QUOTE_MINIMAL)
                 
                 # Escribir encabezados sin tildes
-                csv_writer.writerow(["Tarea", "Titulo", "Nota", "Enlace", "Tiempo (segundos)", "Tiempo (formato)"])
+                csv_writer.writerow(["Tarea", "Titulo", "Nota", "Enlace", "Tiempo (segundos)", "Tiempo (formato)", "Estado", "Fecha Eliminacion"])
                 
-                # Escribir datos de cada tarea
+                # Escribir datos de cada tarea activa
                 for i, task in enumerate(tasks):
                     # Manejar comillas dobles en título, nota y enlace
                     title = task.title.replace('"', "'")
@@ -687,17 +1046,54 @@ def main(page: ft.Page):
                     # Obtener el tiempo formateado
                     time_str = format_time(task.elapsed_time)
                     
-                    # Escribir fila
-                    csv_writer.writerow([i+1, title, note, link, task.elapsed_time, time_str])
+                    # Escribir fila (tareas activas)
+                    csv_writer.writerow([i+1, title, note, link, task.elapsed_time, time_str, "Activa", ""])
+                
+                # Escribir datos de cada tarea eliminada
+                for i, task in enumerate(deleted_tasks):
+                    # Manejar comillas dobles en título, nota y enlace
+                    title = task.title.replace('"', "'")
+                    note = task.note.replace('"', "'") if task.note else ""
+                    link = task.link.replace('"', "'") if hasattr(task, 'link') and task.link else ""
+                    
+                    # Obtener el tiempo formateado
+                    time_str = format_time(task.elapsed_time)
+                    
+                    # Obtener la fecha de eliminación y convertirla de UTC a hora local
+                    deleted_date = ""
+                    if hasattr(task, 'deleted_at') and task.deleted_at:
+                        try:
+                            # Parsear la fecha de SQLite (formato ISO)
+                            utc_date = datetime.datetime.fromisoformat(task.deleted_at.replace(' ', 'T'))
+                            # Convertir a hora local
+                            local_date = utc_date.replace(tzinfo=datetime.timezone.utc).astimezone()
+                            # Formatear la fecha en un formato legible
+                            deleted_date = local_date.strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception as e:
+                            print(f"Error al convertir fecha: {e}")
+                            deleted_date = task.deleted_at  # Usar la fecha original si hay error
+                    
+                    # Escribir fila (tareas eliminadas)
+                    csv_writer.writerow([len(tasks) + i + 1, title, note, link, task.elapsed_time, time_str, "Eliminada", deleted_date])
             
-            # Mostrar mensaje de éxito en snackbar
-            page.snack_bar = ft.SnackBar(content=ft.Text("Archivo CSV exportado exitosamente"))
+            # Mostrar mensaje de éxito en snackbar con la ruta del archivo
+            page.snack_bar = ft.SnackBar(
+                content=ft.Text(f"Archivo CSV exportado exitosamente a: {filepath}"),
+                bgcolor=ft.Colors.GREEN_700,
+                action="OK"
+            )
             page.snack_bar.open = True
             
-            # Mostrar la ruta de descarga en el contenedor de información
-            set_download_info_visible(True, filepath)
+            # Asegurarse de que el contenedor de información sea visible y esté en primer plano
+            download_info_container.visible = True
+            download_path_text.value = f"Archivo CSV guardado en: {filepath}"
+            download_path_text.visible = True
+            
+            # Forzar la actualización de la página para mostrar el mensaje
+            page.update()
             
             print(f"Archivo CSV exportado exitosamente a: {filepath}")
+            print(f"Total de tareas exportadas: {len(tasks)} activas, {len(deleted_tasks)} eliminadas")
             
         except Exception as e:
             # Mostrar mensaje de error
