@@ -2,9 +2,12 @@ import flet as ft
 from utils import format_time
 
 def create_settings_screen(page, tasks, current_task_index, timer_running, timer_paused,
-                          on_edit_task, on_delete_task, on_close, deleted_tasks=None, on_restore_task=None, on_clear_deleted=None, on_export_csv=None):
+                          on_edit_task, on_delete_task, on_close, deleted_tasks=None, on_restore_task=None, on_clear_deleted=None, on_export_csv=None, on_delete_selected=None):
     # Diccionario para almacenar el estado de edición de las tareas
     editing_tasks = {}
+    
+    # Diccionario para almacenar el estado de selección de tareas eliminadas
+    selected_deleted_tasks = {}
     
     # Función para alternar el modo de edición
     def toggle_edit_mode(task_index):
@@ -353,10 +356,24 @@ def create_settings_screen(page, tasks, current_task_index, timer_running, timer
                     print(f"Error al convertir fecha en settings_screen: {e}")
                     deleted_date = task.deleted_at  # Usar la fecha original si hay error
             
+            # Crear checkbox para seleccionar la tarea eliminada
+            task_checkbox = ft.Checkbox(
+                value=selected_deleted_tasks.get(i, False),
+                on_change=lambda e, idx=i: toggle_deleted_task_selection(idx, e.control.value)
+            )
+            
+            # Función para cambiar el estado de selección de una tarea eliminada
+            def toggle_deleted_task_selection(task_idx, is_selected):
+                selected_deleted_tasks[task_idx] = is_selected
+                # Actualizar el botón de eliminar seleccionadas
+                update_delete_selected_button()
+                page.update()
+            
             # Crear un contenedor para la tarea eliminada
             deleted_task_item = ft.Container(
                 content=ft.Column([
                     ft.Row([
+                        task_checkbox,
                         ft.Text(f"Tarea eliminada {i+1}", weight=ft.FontWeight.BOLD),
                         ft.Text(f"Tiempo: {time_str}", color=ft.Colors.BLUE_700),
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -411,6 +428,29 @@ def create_settings_screen(page, tasks, current_task_index, timer_running, timer
             padding=10,
         )
         
+        # Crear el botón para eliminar las tareas seleccionadas
+        delete_selected_button = ft.Container(
+            content=ft.ElevatedButton(
+                text="Eliminar seleccionadas",
+                icon=ft.Icons.DELETE,
+                on_click=lambda e: on_delete_selected(selected_deleted_tasks) if on_delete_selected else None,
+                style=ft.ButtonStyle(
+                    color=ft.Colors.WHITE,
+                    bgcolor=ft.Colors.RED_500,
+                    padding=15,
+                ),
+                disabled=True,  # Inicialmente deshabilitado hasta que se seleccione alguna tarea
+            ),
+            alignment=ft.alignment.center_right,
+            margin=ft.margin.only(top=10, right=10),
+        )
+        
+        # Función para actualizar el estado del botón de eliminar seleccionadas
+        def update_delete_selected_button():
+            # Verificar si hay alguna tarea seleccionada
+            has_selected = any(selected_deleted_tasks.values())
+            delete_selected_button.content.disabled = not has_selected
+        
         # Crear el botón para limpiar todas las tareas eliminadas
         clear_button = ft.Container(
             content=ft.ElevatedButton(
@@ -423,8 +463,14 @@ def create_settings_screen(page, tasks, current_task_index, timer_running, timer
                     padding=15,
                 ),
             ),
-            alignment=ft.alignment.center,
-            margin=ft.margin.only(top=10),
+            alignment=ft.alignment.center_left,
+            margin=ft.margin.only(top=10, left=10),
+        )
+        
+        # Crear un Row para contener ambos botones
+        buttons_row = ft.Row(
+            [clear_button, delete_selected_button],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
         
         # Crear la sección completa de tareas eliminadas
@@ -438,7 +484,7 @@ def create_settings_screen(page, tasks, current_task_index, timer_running, timer
             ),
             ft.Divider(),
             deleted_task_list_container,
-            clear_button,
+            buttons_row,
         ])
     
     # Columna principal con todas las secciones

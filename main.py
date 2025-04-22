@@ -354,7 +354,8 @@ def main(page: ft.Page):
             deleted_tasks,
             restore_task,
             debug_clear_deleted,  # Usar la función de depuración
-            export_tasks_to_csv   # Pasar la función de exportación a CSV
+            export_tasks_to_csv,  # Pasar la función de exportación a CSV
+            delete_selected_tasks  # Pasar la función para eliminar tareas seleccionadas
         )
         
         # Actualizar el contenido del contenedor de configuración
@@ -482,6 +483,83 @@ def main(page: ft.Page):
         
         # Forzar la recarga de la pantalla de configuración
         # Primero limpiar el contenedor
+        config_container.content = None
+        page.update()
+        
+        # Luego recargar la pantalla de configuración
+        show_settings_screen()
+        
+    def delete_selected_tasks(selected_tasks):
+        print(f"delete_selected_tasks llamada con {len([k for k, v in selected_tasks.items() if v])} tareas seleccionadas")
+        
+        # Verificar si hay tareas seleccionadas
+        selected_indices = [idx for idx, selected in selected_tasks.items() if selected]
+        
+        if not selected_indices:
+            # No hay tareas seleccionadas
+            page.snack_bar = ft.SnackBar(content=ft.Text("No hay tareas seleccionadas para eliminar"))
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        # Cargar las tareas eliminadas
+        deleted_tasks = db.load_deleted_tasks()
+        
+        # Verificar que los índices sean válidos
+        valid_indices = [idx for idx in selected_indices if 0 <= idx < len(deleted_tasks)]
+        
+        if not valid_indices:
+            page.snack_bar = ft.SnackBar(content=ft.Text("No se encontraron tareas válidas para eliminar"))
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        # Obtener los IDs de las tareas a eliminar
+        task_ids = []
+        for idx in valid_indices:
+            if idx < len(deleted_tasks) and hasattr(deleted_tasks[idx], 'id'):
+                task_ids.append(deleted_tasks[idx].id)
+        
+        if not task_ids:
+            page.snack_bar = ft.SnackBar(content=ft.Text("No se encontraron IDs válidos para eliminar"))
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        # Eliminar las tareas seleccionadas
+        try:
+            with db.lock:
+                # Crear una cadena de placeholders para la consulta SQL
+                placeholders = ", ".join(["?" for _ in task_ids])
+                
+                # Ejecutar la consulta para eliminar las tareas seleccionadas
+                db.cursor.execute(f"DELETE FROM deleted_tasks WHERE id IN ({placeholders})", task_ids)
+                db.connection.commit()
+                
+                # Verificar cuántas tareas quedan
+                db.cursor.execute("SELECT COUNT(*) FROM deleted_tasks")
+                count_after = db.cursor.fetchone()[0]
+                print(f"Se eliminaron {len(task_ids)} tareas. Quedan {count_after} tareas eliminadas")
+        except Exception as e:
+            print(f"Error al eliminar tareas seleccionadas: {e}")
+            page.snack_bar = ft.SnackBar(
+                content=ft.Text(f"Error al eliminar tareas seleccionadas: {e}"),
+                bgcolor=ft.Colors.RED_700,
+                action="OK"
+            )
+            page.snack_bar.open = True
+            page.update()
+            return
+        
+        # Mostrar mensaje de confirmación
+        page.snack_bar = ft.SnackBar(
+            content=ft.Text(f"Se eliminaron {len(task_ids)} tareas seleccionadas"),
+            bgcolor=ft.Colors.GREEN_700,
+            action="OK"
+        )
+        page.snack_bar.open = True
+        
+        # Forzar la recarga de la pantalla de configuración
         config_container.content = None
         page.update()
         
